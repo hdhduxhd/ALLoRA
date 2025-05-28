@@ -1,11 +1,11 @@
 {
     "prefix": "reproduce",
     "dataset": "ImageNet_R",
-    "data_path": "data/imagenet-r",
+    "data_path": "../SD-Lora-CL/data/imagenet-r",
     "memory_size": 0,
     "memory_per_class": 0,
     "fixed_memory": true,
-    "shuffle": false,
+    "shuffle": true,
     "init_cls": 10,
     "increment": 10,
     "model_name": "InfLoRA",

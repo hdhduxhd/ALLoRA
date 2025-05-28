@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch import optim
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
 import logging
 import numpy as np
@@ -18,6 +18,8 @@ from utils.schedulers import CosineSchedule
 import ipdb
 import math
 from torch.distributions.multivariate_normal import MultivariateNormal
+
+from utils.attack import Attack
 
 class InfLoRA_CA(BaseLearner):
 
@@ -62,8 +64,12 @@ class InfLoRA_CA(BaseLearner):
         self.all_keys = []
         self.feature_list = []
         self.project_type = []
+        self.base_list = []
+        self.base_type = []
 
         self.task_sizes = []
+
+        self.data_manager = 0
 
     def after_task(self):
         # self._old_network = self._network.copy().freeze()
@@ -71,7 +77,7 @@ class InfLoRA_CA(BaseLearner):
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
 
     def incremental_train(self, data_manager):
-
+        self.data_manager = data_manager
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self.task_sizes.append(data_manager.get_task_size(self._cur_task))
@@ -103,6 +109,10 @@ class InfLoRA_CA(BaseLearner):
             self._stage2_compact_classifier(self.task_sizes[-1])
             if len(self._multiple_gpus) > 1:
                 self._network = self._network.module
+
+        mean_errors, cov_errors = self._get_real_mean_cov()
+        logging.info("Mean errors: {}".format(mean_errors))
+        logging.info("Cov errors: {}".format(cov_errors))
 
     def _compute_accuracy(self, model, loader):
         model.eval()
@@ -167,25 +177,27 @@ class InfLoRA_CA(BaseLearner):
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
             else:
+                self.base_list = [torch.tensor(self.feature_mat[ii], device=self._device) for ii in range(len(self.feature_mat))]
+                self.base_type = deepcopy(self.project_type)
                 kk = 0
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
-                        cur_matrix = module.cur_matrix
-                        cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                        module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-
                         # cur_matrix = module.cur_matrix
-                        # if self.project_type[kk] == 'remove':
-                        #     cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        # else:
-                        #     assert self.project_type[kk] == 'retain'
-                        #     cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
-                        # # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                        # cU, cS, cV = torch.svd(cur_matrix)
+                        # cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                        # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
                         # module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         # module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+
+                        cur_matrix = module.cur_matrix
+                        if self.project_type[kk] == 'remove':
+                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                        else:
+                            assert self.project_type[kk] == 'retain'
+                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                        # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                        cU, cS, cV = torch.svd(cur_matrix)
+                        module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
@@ -230,8 +242,8 @@ class InfLoRA_CA(BaseLearner):
                     mat_list.append(deepcopy(module.cur_matrix))
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
-            self.update_GPM(mat_list)
-            # self.update_DualGPM(mat_list)
+            # self.update_GPM(mat_list)
+            self.update_DualGPM(mat_list)
 
             # Projection Matrix Precomputation
             self.feature_mat = []
@@ -511,7 +523,7 @@ class InfLoRA_CA(BaseLearner):
                         print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
                     # update GPM
-                    Ui=np.hstack((self.feature_list[i],U[:,0:r]))  
+                    Ui=np.hstack((self.feature_list[i],U[:,0:r]))
                     if Ui.shape[1] > Ui.shape[0] :
                         self.feature_list[i]=Ui[:,0:Ui.shape[0]]
                     else:
@@ -574,8 +586,69 @@ class InfLoRA_CA(BaseLearner):
         optimizer = optim.SGD(network_params, lr=0.01, momentum=0.9, weight_decay=0.0005)
         # scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=[4], gamma=lrate_decay)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=run_epochs)
-
         self._network.to(self._device)
+
+        # compensate the semantic drift in the prototypes with ADC
+        if self.args["ADC"]:
+            epoch = self.args["adv_epoch"]
+            print('alpha: ',self.args["alpha"])
+
+            for k, (_, data, label) in enumerate(self.train_loader):
+                if k == 0:
+                    x_min = data.min()
+                    x_max = data.max()
+                else:
+                    if data.min() < x_min:
+                        x_min = data.min()
+                    if data.max() > x_max:
+                        x_max = data.max()
+
+            xx, yy, feats = [], [], []
+            for _, data, label in self.train_loader:
+                xx.append(data)
+                yy.append(label)
+
+            xx = torch.cat(xx, dim=0)
+            yy = torch.cat(yy, dim=0)
+            feats = torch.tensor(self._extract_vectors(self.train_loader, old=True)[0]).to(self._device)
+
+            for class_idx in range(0, self._known_classes):
+                d = torch.cdist(feats, torch.tensor(self._class_means[class_idx], dtype=torch.float).unsqueeze(0).to(self._device)).squeeze()
+                closest = torch.argsort(d)[:self.args["sample_limit"]].cpu()
+                x_top = xx[[closest]]
+                y_top = yy[[closest]]
+                
+                idx_dataset = TensorDataset(x_top, y_top)
+                loader = DataLoader(idx_dataset, batch_size=int(self.args["sample_limit"]), shuffle=False)
+
+                attack = Attack(self._network, self.args["alpha"], loader, self._class_means[:self._known_classes], self._device, epoch, x_min, x_max, class_idx)
+                
+                x_, y_ = attack.run()
+                if len(x_) > 0:
+                    idx_dataset = TensorDataset(x_, y_)
+                idx_loader = DataLoader(idx_dataset, batch_size=self.batch_size, shuffle=False)
+
+                if idx_loader is not None:
+                    vectors_old = self._extract_vectors_adv(idx_loader, old=True)[0]
+                    vectors = self._extract_vectors_adv(idx_loader)[0]
+
+                MU = np.asarray(torch.tensor(self._class_means[class_idx], dtype=torch.float).unsqueeze(0).cpu())
+                gap = np.mean(vectors - vectors_old, axis=0)
+                MU += gap
+                self._class_means[class_idx] = MU[0]
+
+                # self._class_covs[class_idx] = (torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(MU.shape[-1])*1e-5)
+                    
+        # compensate the semantic drift in the prototypes with SDC
+        if self.args["SDC"]:
+            emb_old = self._extract_vectors(self.train_loader, old=True, bases=self.base_list, types=self.base_type)[0]
+            emb = self._extract_vectors(self.train_loader)[0]
+            MU = np.stack(self._class_means[:self._known_classes])
+            gap = self.displacement(emb_old, emb, MU, self.args["sigma"])
+
+            MU += gap
+            self._class_means[:self._known_classes] = MU
+
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
 
@@ -725,8 +798,8 @@ class InfLoRA_CA(BaseLearner):
 
             class_mean = np.mean(vectors, axis=0)
             class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-4
-            # centered_vectors = vectors - class_mean
-            # class_cov = torch.matmul(centered_vectors.T, centered_vectors) / (centered_vectors.size(0) - 1)+torch.eye(class_mean.shape[-1])*1e-4
+#             centered_vectors = vectors - class_mean
+#             class_cov = torch.matmul(centered_vectors.T, centered_vectors) / (centered_vectors.size(0) - 1)+torch.eye(class_mean.shape[-1])*1e-4
 
             if check_diff:
                 log_info = "cls {} sim: {}".format(class_idx, torch.cosine_similarity(torch.tensor(self._class_means[class_idx, :]).unsqueeze(0), torch.tensor(class_mean).unsqueeze(0)).item())
@@ -738,8 +811,62 @@ class InfLoRA_CA(BaseLearner):
             self._class_covs[class_idx, ...] = class_cov
             # self._class_covs.append(class_cov)
 
+    def displacement(self, Y1, Y2, embedding_old, sigma):
+        DY = (Y2 - Y1)
+        distance = np.sum((np.tile(Y1[None, :, :], [embedding_old.shape[0], 1, 1])-np.tile(embedding_old[:, None, :], [1, Y1.shape[0], 1]))**2, axis=2)
+        W = np.exp(-distance/(2*sigma ** 2)) +1e-5
+        #print(W) # 1e-5
+        W_norm = W/np.tile(np.sum(W, axis=1)[:, None], [1, W.shape[1]])
+        displacement = np.sum(np.tile(W_norm[:, :, None], [1, 1, DY.shape[1]])*np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
+        return displacement
+
+    def _extract_vectors(self, loader, old=False, bases=None, types=None):
+        self._network.eval()
+        vectors, targets = [], []
+        for _, _inputs, _targets in loader:
+            _targets = _targets.numpy()
+            if isinstance(self._network, nn.DataParallel):
+                if old:
+                    _vectors = tensor2numpy(self._network.module.extract_vector_old(_inputs.to(self._device), bases=bases, types=types))
+                else:
+                    _vectors = tensor2numpy(self._network.module.extract_vector(_inputs.to(self._device)))
+            else:
+                if old:
+                    _vectors = tensor2numpy(self._network.extract_vector_old(_inputs.to(self._device), bases=bases, types=types))
+                else:
+                    _vectors = tensor2numpy(self._network.extract_vector(_inputs.to(self._device)))
+
+            vectors.append(_vectors)
+            targets.append(_targets)
+
+        return np.concatenate(vectors), np.concatenate(targets)
 
 
+    def _get_real_mean_cov(self):
+        real_protos = []
+        real_covs = []
+        for class_idx in range(0, self._total_classes):
+            idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
+            idx_loader = DataLoader(idx_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+            vectors, _ = self._extract_vectors(idx_loader)
+            class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
+            real_protos.append(torch.tensor(class_mean))
+            class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-5
+            real_covs.append(class_cov)
 
+        # 计算均值误差
+        mean_errors = []
+        for rp, ep in zip(real_protos, self._class_means):
+            error = torch.norm(rp - torch.tensor(ep), p=2)  # 欧氏距离
+            mean_errors.append(error.item())
+        # mean_error = torch.mean(torch.stack(mean_errors)).item()
+        
+        # 计算协方差误差
+        cov_errors = []
+        for rc, ec in zip(real_covs, self._class_covs):
+            error = torch.norm(rc - ec, p='fro')  # 弗罗贝尼乌斯范数
+            cov_errors.append(error.item())
+        # cov_error = torch.mean(torch.stack(cov_errors)).item()
 
+        return mean_errors, cov_errors
 

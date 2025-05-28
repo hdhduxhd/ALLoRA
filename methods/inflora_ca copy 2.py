@@ -175,17 +175,6 @@ class InfLoRA_CA(BaseLearner):
                         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-
-                        # cur_matrix = module.cur_matrix
-                        # if self.project_type[kk] == 'remove':
-                        #     cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        # else:
-                        #     assert self.project_type[kk] == 'retain'
-                        #     cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
-                        # # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                        # cU, cS, cV = torch.svd(cur_matrix)
-                        # module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        # module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
@@ -231,7 +220,6 @@ class InfLoRA_CA(BaseLearner):
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
             self.update_GPM(mat_list)
-            # self.update_DualGPM(mat_list)
 
             # Projection Matrix Precomputation
             self.feature_mat = []
@@ -316,6 +304,7 @@ class InfLoRA_CA(BaseLearner):
 
     def _evaluate(self, y_pred, y_true):
         ret = {}
+        print(len(y_pred), len(y_true))
         grouped = accuracy(y_pred, y_true, self._known_classes, self.class_num)
         ret['grouped'] = grouped
         ret['top1'] = grouped['total']
@@ -468,98 +457,6 @@ class InfLoRA_CA(BaseLearner):
             print ('Layer {} : {}/{}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0]))
         print('-'*40)  
 
-    def update_DualGPM (self, mat_list):
-        threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
-        print ('Threshold: ', threshold) 
-        if len(self.feature_list) == 0:
-            # After First Task 
-            for i in range(len(mat_list)):
-                activation = mat_list[i]
-                U,S,Vh = np.linalg.svd(activation, full_matrices=False)
-                # criteria (Eq-5)
-                sval_total = (S**2).sum()
-                sval_ratio = (S**2)/sval_total
-                r = np.sum(np.cumsum(sval_ratio)<threshold) #+1  
-                if r < (activation.shape[0]/2):
-                    self.feature_list.append(U[:,0:max(r,1)])
-                    self.project_type.append('remove')
-                else:
-                    self.feature_list.append(U[:,0:max(r,1)])
-                    self.project_type.append('retain')
-        else:
-            for i in range(len(mat_list)):
-                if self.project_type[i] == 'remove':
-                    activation = mat_list[i]
-                    U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
-                    sval_total = (S1**2).sum()
-                    # Projected Representation (Eq-8)
-                    act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
-                    U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
-                    # criteria (Eq-9)
-                    sval_hat = (S**2).sum()
-                    sval_ratio = (S**2)/sval_total               
-                    accumulated_sval = (sval_total-sval_hat)/sval_total
-            
-                    r = 0
-                    for ii in range (sval_ratio.shape[0]):
-                        if accumulated_sval < threshold:
-                            accumulated_sval += sval_ratio[ii]
-                            r += 1
-                        else:
-                            break
-                    if r == 0:
-                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
-                        continue
-                    # update GPM
-                    Ui=np.hstack((self.feature_list[i],U[:,0:r]))  
-                    if Ui.shape[1] > Ui.shape[0] :
-                        self.feature_list[i]=Ui[:,0:Ui.shape[0]]
-                    else:
-                        self.feature_list[i]=Ui
-                else:
-                    assert self.project_type[i] == 'retain'
-                    activation = mat_list[i]
-                    U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
-                    sval_total = (S1**2).sum()
-                    # Projected Representation (Eq-8)
-                    act_hat = np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
-                    U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
-                    # criteria (Eq-9)
-                    sval_hat = (S**2).sum()
-                    sval_ratio = (S**2)/sval_total               
-                    accumulated_sval = sval_hat/sval_total
-
-                    r = 0
-                    for ii in range (sval_ratio.shape[0]):
-                        if accumulated_sval >= (1-threshold):
-                            accumulated_sval -= sval_ratio[ii]
-                            r += 1
-                        else:
-                            break
-                    if r == 0:
-                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
-                        continue
-
-                    # update GPM by Projected Representation (Eq-8)
-                    act_feature = self.feature_list[i] - np.dot(np.dot(U[:,0:r],U[:,0:r].transpose()),self.feature_list[i])
-                    Ui, Si, Vi = np.linalg.svd(act_feature)
-                    self.feature_list[i]=Ui[:,:self.feature_list[i].shape[1]-r]
-
-        print('-'*40)
-        print('Gradient Constraints Summary')
-        print('-'*40)
-        for i in range(len(self.feature_list)):
-            if self.project_type[i]=='remove' and (self.feature_list[i].shape[1] > (self.feature_list[i].shape[0]/2)):
-                feature = self.feature_list[i]
-                # ipdb.set_trace()
-                U, S, V = np.linalg.svd(feature)
-                new_feature = U[:,feature.shape[1]:]
-                self.feature_list[i] = new_feature
-                self.project_type[i] = 'retain'
-            elif self.project_type[i]=='retain':
-                assert self.feature_list[i].shape[1] <= (self.feature_list[i].shape[0]/2)
-            print ('Layer {} : {}/{} type {}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0], self.project_type[i]))
-        print('-'*40)
 
 
     def _stage2_compact_classifier(self, task_size):
@@ -688,10 +585,8 @@ class InfLoRA_CA(BaseLearner):
                 # vectors, _ = self._extract_vectors_aug(idx_loader)
                 vectors, _ = self._extract_vectors(idx_loader)
                 class_mean = np.mean(vectors, axis=0)
-                class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)
-                # class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)
-#                 centered_vectors = vectors - class_mean
-#                 class_cov = torch.matmul(centered_vectors.T, centered_vectors) / (centered_vectors.size(0) - 1)
+                # class_cov = np.cov(vectors.T)
+                class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)
                 if check_diff:
                     log_info = "cls {} sim: {}".format(class_idx, torch.cosine_similarity(torch.tensor(self._class_means[class_idx, :]).unsqueeze(0), torch.tensor(class_mean).unsqueeze(0)).item())
                     logging.info(log_info)
@@ -708,10 +603,8 @@ class InfLoRA_CA(BaseLearner):
                 # vectors = np.concatenate([vectors_aug, vectors])
 
                 class_mean = np.mean(vectors, axis=0)
-                class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-5
-                # class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)+torch.eye(class_mean.shape[-1])*1e-5
-#                 centered_vectors = vectors - class_mean
-#                 class_cov = torch.matmul(centered_vectors.T, centered_vectors) / (centered_vectors.size(0) - 1)+torch.eye(class_mean.shape[-1])*1e-5
+                # class_cov = np.cov(vectors.T)
+                class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)+torch.eye(class_mean.shape[-1])*1e-5
                 self._class_means[class_idx, :] = class_mean
                 self._class_covs[class_idx, ...] = class_cov            
 
@@ -724,9 +617,9 @@ class InfLoRA_CA(BaseLearner):
             # vectors = np.concatenate([vectors_aug, vectors])
 
             class_mean = np.mean(vectors, axis=0)
+            # class_cov = np.cov(vectors.T)
+            # class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)+torch.eye(class_mean.shape[-1])*1e-4
             class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-4
-            # centered_vectors = vectors - class_mean
-            # class_cov = torch.matmul(centered_vectors.T, centered_vectors) / (centered_vectors.size(0) - 1)+torch.eye(class_mean.shape[-1])*1e-4
 
             if check_diff:
                 log_info = "cls {} sim: {}".format(class_idx, torch.cosine_similarity(torch.tensor(self._class_means[class_idx, :]).unsqueeze(0), torch.tensor(class_mean).unsqueeze(0)).item())
@@ -737,9 +630,3 @@ class InfLoRA_CA(BaseLearner):
             self._class_means[class_idx, :] = class_mean
             self._class_covs[class_idx, ...] = class_cov
             # self._class_covs.append(class_cov)
-
-
-
-
-
-

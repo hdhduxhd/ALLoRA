@@ -171,6 +171,14 @@ default_cfgs = {
     'vit_base_patch16_18x2_224': _cfg(url=''),
 }
 
+class ParameterWrapper(nn.Module):
+    def __init__(self, param):
+        super(ParameterWrapper, self).__init__()
+        self.weight = param
+    
+    def forward(self, x):
+        # print('x, param', x.device(), self.pram.device())
+        return F.linear(x, torch.diag(self.weight))
 
 class Attention_LoRA(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., r=64, n_tasks=10):
@@ -205,6 +213,8 @@ class Attention_LoRA(nn.Module):
         self.lora_A_trans_v = nn.ModuleList([nn.Linear(dim, r, bias=False) for _ in range(n_tasks)])
         self.lora_B_trans_v = nn.ModuleList([nn.Linear(r, dim, bias=False) for _ in range(n_tasks)])
 
+        self.lora_S_trans_k = nn.ModuleList([ParameterWrapper(nn.Parameter(torch.Tensor([0.0 for _ in range(r)]))) for _ in range(n_tasks)])
+        self.lora_S_trans_v = nn.ModuleList([ParameterWrapper(nn.Parameter(torch.Tensor([0.0 for _ in range(r)]))) for _ in range(n_tasks)])
     def init_param(self):
         for t in range(len(self.lora_A_k)):
             nn.init.kaiming_uniform_(self.lora_A_k[t].weight, a=math.sqrt(5))
@@ -239,6 +249,7 @@ class Attention_LoRA(nn.Module):
         nn.init.zeros_(self.lora_B_trans_k[t].weight)
         nn.init.zeros_(self.lora_B_trans_v[t].weight)
 
+
     def save_attn_gradients(self, attn_gradients):
         self.attn_gradients = attn_gradients
         
@@ -269,8 +280,12 @@ class Attention_LoRA(nn.Module):
             weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
             weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
 
-            weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
-            weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            # weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            # weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            # 包含缩放矩阵的trans路径计算（新增部分）
+            weight_trans_k = torch.stack([torch.mm(torch.mm(self.lora_B_trans_k[t].weight, torch.diag(self.lora_S_trans_k[t].weight)), self.lora_A_trans_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            weight_trans_v = torch.stack([torch.mm(torch.mm(self.lora_B_trans_v[t].weight, torch.diag(self.lora_S_trans_v[t].weight)), self.lora_A_trans_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            
             k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
             v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
@@ -295,13 +310,16 @@ class Attention_LoRA(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
         # insert lora
-        if task-1 > -0.5:
+        if task > -0.5:
             #learning discrepancy
-            weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
-            weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+            weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
 
-            weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
-            weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+            # weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
+            # weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+            weight_trans_k = torch.stack([torch.mm(torch.mm(self.lora_B_trans_k[t].weight, torch.diag(self.lora_S_trans_k[t])), self.lora_A_trans_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            weight_trans_v = torch.stack([torch.mm(torch.mm(self.lora_B_trans_v[t].weight, torch.diag(self.lora_S_trans_v[t])), self.lora_A_trans_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            
             k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
             v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
@@ -323,13 +341,17 @@ class Attention_LoRA(nn.Module):
     def get_matrix(self, task):
         matrix_k = torch.mm(self.lora_B_k[task].weight, self.lora_A_k[task].weight)
         matrix_v = torch.mm(self.lora_B_v[task].weight, self.lora_A_v[task].weight)
-        return matrix_k, matrix_v
+        matrix_tran_k = torch.mm(torch.mm(self.lora_B_trans_k[task].weight, torch.diag(self.lora_S_trans_k[task])), self.lora_A_trans_k[task].weight)
+        matrix_trans_v = torch.mm(torch.mm(self.lora_B_trans_v[task].weight, torch.diag(self.lora_S_trans_v[task])), self.lora_A_trans_v[task].weight)
+        return matrix_k + matrix_tran_k, matrix_v + matrix_trans_v
     
     def get_pre_matrix(self, task):
         with torch.no_grad():
             weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
             weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
-        return weight_k, weight_v
+            weight_trans_k = torch.stack([torch.mm(torch.mm(self.lora_B_trans_k[t].weight, torch.diag(self.lora_S_trans_k[t].weight)), self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
+            weight_trans_v = torch.stack([torch.mm(torch.mm(self.lora_B_trans_v[t].weight, torch.diag(self.lora_S_trans_v[t].weight)), self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+        return weight_k + weight_trans_k, weight_v + weight_trans_v
 
 class LayerScale(nn.Module):
     def __init__(self, dim, init_values=1e-5, inplace=False):

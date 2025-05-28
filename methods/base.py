@@ -156,6 +156,27 @@ class BaseLearner(object):
             targets.append(_targets)
 
         return np.concatenate(vectors), np.concatenate(targets)
+    
+    def _extract_vectors_adv(self, loader, old=False):
+        self._network.eval()
+        vectors, targets = [], []
+        for _inputs, _targets in loader:
+            _targets = _targets.cpu().numpy()
+            if isinstance(self._network, nn.DataParallel):
+                if old:
+                    _vectors = tensor2numpy(self._network.module.extract_vector_old(_inputs.to(self._device)))
+                else:
+                    _vectors = tensor2numpy(self._network.module.extract_vector(_inputs.to(self._device)))
+            else:
+                if old:
+                    _vectors = tensor2numpy(self._network.extract_vector_old(_inputs.to(self._device)))
+                else:
+                    _vectors = tensor2numpy(self._network.extract_vector(_inputs.to(self._device)))
+
+            vectors.append(_vectors)
+            targets.append(_targets)
+
+        return np.concatenate(vectors), np.concatenate(targets)
 
     def _reduce_exemplar(self, data_manager, m):
         logging.info('Reducing exemplars...({} per classes)'.format(m))

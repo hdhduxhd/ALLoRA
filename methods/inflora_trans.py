@@ -11,8 +11,8 @@ from sklearn.cluster import KMeans
 
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy, accuracy
-from models.sinet_inflora import SiNet
-from models.vit_inflora import Attention_LoRA
+from models.sinet_inflora_trans import SiNet
+from models.vit_inflora_trans import Attention_LoRA
 from copy import deepcopy
 from utils.schedulers import CosineSchedule
 import ipdb
@@ -49,6 +49,7 @@ class InfLoRA(BaseLearner):
         self.lame = args["lame"]
         self.total_sessions = args["total_sessions"]
         self.dataset = args["dataset"]
+        self.rank = args["rank"]
 
         self.topk = 1  # origin is 5
         self.class_num = self._network.class_num
@@ -57,6 +58,7 @@ class InfLoRA(BaseLearner):
         self.all_keys = []
         self.feature_list = []
         self.project_type = []
+        self._protos = []
 
     def after_task(self):
         # self._old_network = self._network.copy().freeze()
@@ -64,7 +66,7 @@ class InfLoRA(BaseLearner):
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
 
     def incremental_train(self, data_manager):
-
+        self.data_manager = data_manager
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self._network.update_fc(self._total_classes)
@@ -81,6 +83,7 @@ class InfLoRA(BaseLearner):
         # if len(self._multiple_gpus) > 1:
         #     self._network = nn.DataParallel(self._network, self._multiple_gpus)
         self._train(self.train_loader, self.test_loader)
+        self._build_protos()
         self.clustering(self.train_loader)
         # if len(self._multiple_gpus) > 1:
         #     self._network = self._network.module
@@ -99,12 +102,29 @@ class InfLoRA(BaseLearner):
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
+                # if "lora_B_trans_k" + "." + str(self._network.module.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                # if "lora_B_trans_v" + "." + str(self._network.module.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                if "lora_S_trans_k" + "." + str(self._network.module.numtask - 1) in name:
+                    param.requires_grad_(True)
+                if "lora_S_trans_v" + "." + str(self._network.module.numtask - 1) in name:
+                    param.requires_grad_(True)
+
             except:
                 if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
                 if "lora_B_k" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.numtask - 1) in name:
+                    param.requires_grad_(True)
+                # if "lora_B_trans_k" + "." + str(self._network.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                # if "lora_B_trans_v" + "." + str(self._network.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                if "lora_S_trans_k" + "." + str(self._network.numtask - 1) in name:
+                    param.requires_grad_(True)
+                if "lora_S_trans_v" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
 
         # Double check
@@ -126,6 +146,10 @@ class InfLoRA(BaseLearner):
                         U, S, V = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        # module.lora_A_trans_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        # module.lora_A_trans_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        module.lora_A_trans_k[self._cur_task].weight.data.zero_()
+                        module.lora_A_trans_v[self._cur_task].weight.data.zero_()
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
             else:
@@ -144,16 +168,65 @@ class InfLoRA(BaseLearner):
                 kk = 0
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
+                        # weight_k, weight_v = module.get_pre_matrix(self._cur_task)
                         cur_matrix = module.cur_matrix
+                        # cU_n, cS_n, cV_n = torch.svd(cur_matrix)
+                        # weight_k, weight_v = weight_k.cpu(), weight_v.cpu()
+                        # weight_k = torch.mm(torch.mm(cU_n,cU_n.transpose(0, 1)), weight_k)
+                        # weight_v = torch.mm(torch.mm(cU_n,cU_n.transpose(0, 1)), weight_v)
+                        cU_n, cS_n, cV_n = torch.svd(cur_matrix)
                         if self.project_type[kk] == 'remove':
+                            cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
                             cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
                         else:
                             assert self.project_type[kk] == 'retain'
+                            cur_matrix_new = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
                             cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
-                        # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
                         cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
+                        # A_trans_pinv = torch.pinverse(cU_n[:,:module.rank].T/math.sqrt(3))  # 结果形状 (k, m) = (50, 100)
+                        module.lora_A_trans_k[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # B_trans_k = weight_k @ A_trans_pinv
+                        B_trans_k = torch.zeros_like(cU_n[:,:module.rank])
+                        B_trans_k[:module.rank, :module.rank] = torch.eye(module.rank)
+                        module.lora_B_trans_k[self._cur_task].weight.data.copy_(B_trans_k)
+                        module.lora_A_trans_v[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # B_trans_v = weight_v @ A_trans_pinv
+                        B_trans_v = torch.zeros_like(cU_n[:,:module.rank])
+                        B_trans_v[:module.rank, :module.rank] = torch.eye(module.rank)
+                        module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
+
+
+
+                        # weight_k, weight_v = module.get_pre_matrix(self._cur_task)
+                        # weight_k, weight_v = weight_k.cpu(), weight_v.cpu()
+                        # cur_matrix = module.cur_matrix
+                        # cU_k, cS_k, cV_k = torch.svd(weight_k)
+                        # cU_v, cS_v, cV_v = torch.svd(weight_v)
+                        # cur_matrix_new = torch.mm(torch.mm(cU_k,cU_k.transpose(0, 1)),cur_matrix)
+                        # cur_matrix = cur_matrix - cur_matrix_new
+                        # cU, cS, cV = torch.svd(cur_matrix)
+                        # module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        # cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
+                        # # A_trans_pinv = torch.pinverse(cU_n[:,:module.rank].T/math.sqrt(3))  # 结果形状 (k, m) = (50, 100)
+                        # module.lora_A_trans_k[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # # B_trans_k = weight_k @ A_trans_pinv
+                        # B_trans_k = torch.zeros_like(cU_n[:,:module.rank])
+                        # B_trans_k[:module.rank, :module.rank] = torch.eye(module.rank)
+                        # module.lora_B_trans_k[self._cur_task].weight.data.copy_(B_trans_k)
+
+                        # cur_matrix_new = torch.mm(torch.mm(cU_v,cU_v.transpose(0, 1)),cur_matrix)
+                        # cur_matrix = cur_matrix - cur_matrix_new
+                        # cU, cS, cV = torch.svd(cur_matrix)
+                        # module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        # cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
+                        # module.lora_A_trans_v[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # # B_trans_v = weight_v @ A_trans_pinv
+                        # B_trans_v = torch.zeros_like(cU_n[:,:module.rank])
+                        # B_trans_v[:module.rank, :module.rank] = torch.eye(module.rank)
+                        # module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
@@ -161,23 +234,50 @@ class InfLoRA(BaseLearner):
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
+        
+        # 分离参数组
+        trans_params = []
+        other_params = []
+        
+        # 遍历所有可训练参数
+        for name, param in self._network.named_parameters():
+            if param.requires_grad:
+                if any(key in name for key in ['lora_S_trans_k', 'lora_S_trans_v']):
+                    trans_params.append(param)
+                else:
+                    other_params.append(param)
+
         if self._cur_task==0:
+            # 创建分层参数组
+            params = [
+                {'params': trans_params, 'lr': self.init_lr/10},  # 特殊学习率
+                {'params': other_params, 'lr': self.init_lr}
+            ]
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
+                # optimizer = optim.SGD(params, momentum=0.9, weight_decay=self.weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.init_epoch)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.init_lr,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
+                # optimizer = optim.Adam(params, betas=(0.9,0.999), weight_decay=self.weight_decay)
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.init_epoch)
             else:
                 raise Exception
             self.run_epoch = self.init_epoch
             self.train_function(train_loader,test_loader,optimizer,scheduler)
         else:
+            # 创建分层参数组
+            params = [
+                {'params': trans_params, 'lr': self.lrate/10},  # 特殊学习率
+                {'params': other_params, 'lr': self.lrate}
+            ]
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.lrate,weight_decay=self.weight_decay)
+                # optimizer = optim.SGD(params, momentum=0.9, weight_decay=self.weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.epochs)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.lrate,weight_decay=self.weight_decay, betas=(0.9,0.999))
+                # optimizer = optim.Adam(params, betas=(0.9,0.999), weight_decay=self.weight_decay)
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.epochs)
             else:
                 raise Exception
@@ -192,11 +292,16 @@ class InfLoRA(BaseLearner):
                 self._network(inputs, get_cur_feat=True)
 
             mat_list = []
+            layer = 0
             for module in self._network.modules():
                 if isinstance(module, Attention_LoRA):
+                    layer += 1
                     mat_list.append(deepcopy(module.cur_matrix))
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
+                    logging.info('Layer {} - lora_S_trans_k {}: {}, lora_S_trans_v {}: {}'
+                                 .format(layer, torch.sum(torch.abs(module.lora_S_trans_k[self._cur_task].weight)), module.lora_S_trans_k[self._cur_task].weight.cpu().numpy(),
+                                        torch.sum(torch.abs(module.lora_S_trans_v[self._cur_task].weight)), module.lora_S_trans_v[self._cur_task].weight.cpu().numpy()))
             # self.update_GPM(mat_list)
             self.update_DualGPM(mat_list)
 
@@ -222,8 +327,26 @@ class InfLoRA(BaseLearner):
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask)-self._known_classes
 
-                logits = self._network(inputs)['logits']
-                loss = F.cross_entropy(logits, targets)
+                output = self._network(inputs)
+                logits = output['logits']
+                loss = F.cross_entropy(logits[:, self._known_classes:], targets)
+
+                # if self._cur_task > 0:
+                #     if isinstance(self._network, torch.nn.DataParallel):
+                #             loss_kd = _KD_loss(
+                #             logits[:, : self._known_classes],
+                #             self._network.module.interface_old(inputs),
+                #             2,
+                #         )
+                #     else:
+                #         loss_kd = _KD_loss(
+                #             logits[:, : self._known_classes],
+                #             self._network.interface_old(inputs),
+                #             2,
+                #         )
+                # else:
+                #     loss_kd = 0
+                # loss = loss + loss_kd * 10
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -242,7 +365,6 @@ class InfLoRA(BaseLearner):
             info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
                 self._cur_task, epoch + 1, self.run_epoch, losses / len(train_loader), train_acc)
             prog_bar.set_description(info)
-
         logging.info(info)
 
 
@@ -265,7 +387,6 @@ class InfLoRA(BaseLearner):
 
     def _evaluate(self, y_pred, y_true):
         ret = {}
-        print(len(y_pred), len(y_true))
         grouped = accuracy(y_pred, y_true, self._known_classes, self.class_num)
         ret['grouped'] = grouped
         ret['top1'] = grouped['total']
@@ -304,6 +425,16 @@ class InfLoRA(BaseLearner):
             y_true.append(targets.cpu().numpy())
 
         return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
+    
+    def test(self, num_task, data_manager):
+        test_dataset = data_manager.get_dataset(np.arange(0, 200), source='test', mode='test')
+        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        self._network.to(self._device)
+#         if len(self._multiple_gpus) > 1:
+#             self._network = nn.DataParallel(self._network, self._multiple_gpus)
+        for i in range(num_task):
+            self._network.update_fc(self._total_classes)
+        return self.eval_task()
 
     def _compute_accuracy_domain(self, model, loader):
         model.eval()
@@ -321,7 +452,8 @@ class InfLoRA(BaseLearner):
 
     def update_DualGPM (self, mat_list):
         threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
-        print ('Threshold: ', threshold) 
+        # threshold = self.lamb
+        logging.info ('Threshold: {}'.format(threshold) )
         if len(self.feature_list) == 0:
             # After First Task 
             for i in range(len(mat_list)):
@@ -350,16 +482,18 @@ class InfLoRA(BaseLearner):
                     sval_hat = (S**2).sum()
                     sval_ratio = (S**2)/sval_total               
                     accumulated_sval = (sval_total-sval_hat)/sval_total
+                    logging.info("effective bases ratio: {}, frozen bases ratio: {}".format(sval_ratio[:self.rank].sum(), accumulated_sval))
             
                     r = 0
                     for ii in range (sval_ratio.shape[0]):
+                    # for ii in range (self.rank):
                         if accumulated_sval < threshold:
                             accumulated_sval += sval_ratio[ii]
                             r += 1
                         else:
                             break
                     if r == 0:
-                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
+                        logging.info ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
                     # update GPM
                     Ui=np.hstack((self.feature_list[i],U[:,0:r]))  
@@ -379,16 +513,18 @@ class InfLoRA(BaseLearner):
                     sval_hat = (S**2).sum()
                     sval_ratio = (S**2)/sval_total               
                     accumulated_sval = sval_hat/sval_total
+                    logging.info("effective bases ratio: {}, frozen bases ratio: {}".format(sval_ratio[:self.rank].sum(), 1 - accumulated_sval))
 
                     r = 0
                     for ii in range (sval_ratio.shape[0]):
+                    # for ii in range (self.rank):
                         if accumulated_sval >= (1-threshold):
                             accumulated_sval -= sval_ratio[ii]
                             r += 1
                         else:
                             break
                     if r == 0:
-                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
+                        logging.info ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
 
                     # update GPM by Projected Representation (Eq-8)
@@ -396,9 +532,9 @@ class InfLoRA(BaseLearner):
                     Ui, Si, Vi = np.linalg.svd(act_feature)
                     self.feature_list[i]=Ui[:,:self.feature_list[i].shape[1]-r]
 
-        print('-'*40)
-        print('Gradient Constraints Summary')
-        print('-'*40)
+        logging.info('-'*40)
+        logging.info('Gradient Constraints Summary')
+        logging.info('-'*40)
         for i in range(len(self.feature_list)):
             if self.project_type[i]=='remove' and (self.feature_list[i].shape[1] > (self.feature_list[i].shape[0]/2)):
                 feature = self.feature_list[i]
@@ -409,8 +545,8 @@ class InfLoRA(BaseLearner):
                 self.project_type[i] = 'retain'
             elif self.project_type[i]=='retain':
                 assert self.feature_list[i].shape[1] <= (self.feature_list[i].shape[0]/2)
-            print ('Layer {} : {}/{} type {}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0], self.project_type[i]))
-        print('-'*40)
+            logging.info ('Layer {} : {}/{} type {}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0], self.project_type[i]))
+        logging.info('-'*40)
 
 
     def update_GPM (self, mat_list):
@@ -462,3 +598,32 @@ class InfLoRA(BaseLearner):
         for i in range(len(self.feature_list)):
             logging.info('Layer {} : {}/{}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0]))
         print('-'*40)  
+
+    def _build_protos(self):
+        for class_idx in range(self._known_classes, self._total_classes):
+            idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
+            idx_loader = DataLoader(idx_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+            vectors, _ = self._extract_vectors(idx_loader)
+            class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
+            self._protos.append(torch.tensor(class_mean).to(self._device))
+
+def _KD_loss(pred, soft, T):
+    # print(pred.shape)
+    # print(soft.shape)
+    pred = torch.log_softmax(pred / T, dim=1)
+    soft = torch.softmax(soft / T, dim=1)
+    return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
+
+def weighted_KD_loss(pred, soft, T):
+
+    # 生成权重向量 (设备自动匹配)
+    weights = torch.cat([torch.full((10,), 1-0.01*w, device=pred.device) for w in range(pred.shape[1]//10)])
+    
+    # 温度缩放
+    pred_log_soft = torch.log_softmax(pred / T, dim=1)
+    soft_soft = torch.softmax(soft / T, dim=1)
+    
+    # 加权损失计算
+    weighted_loss = -(soft_soft * pred_log_soft * weights).sum(dim=1).mean()
+    
+    return weighted_loss

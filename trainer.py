@@ -8,6 +8,7 @@ import torch
 from utils import factory
 from utils.data_manager import DataManager
 from utils.toolkit import count_parameters
+import numpy as np
 import wandb
 
 def train(args):
@@ -37,8 +38,8 @@ def train(args):
 
 
 def _train(args):
-    if args['model_name'] in ['InfLoRA', 'InfLoRA_domain', 'InfLoRAb5_domain', 'InfLoRAb5', 'InfLoRA_CA', 'InfLoRA_CA1']:
-        logdir = 'logs/{}/{}_{}_{}/{}/{}/{}/{}_{}-{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'], args['rank'], args['lamb'], args['lame'], args['lrate'])
+    if args['model_name'] in ['InfLoRA', 'InfLoRA_TRANS', 'InfLoRA_domain', 'InfLoRAb5_domain', 'InfLoRAb5', 'InfLoRA_CA', 'InfLoRA_CA_SHIFT', 'InfLoRA_CA1']:
+        logdir = 'logs/{}/{}_{}_{}/{}/{}/{}/{}_{}-{}_{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'], args['rank'], args['lamb'], args['lame'], args['lrate'], args['epochs'])
     else:
         logdir = 'logs/{}/{}_{}_{}/{}/{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'])
 
@@ -64,6 +65,7 @@ def _train(args):
     model = factory.get_model(args['model_name'], args)
 
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task, cnn_curve_with_task_on_key = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
+    cnn_matrix = []
     cnn_curve_task_keys = [[] for _ in range(12)]
     for task in range(data_manager.nb_tasks):
         logging.info('All params: {}'.format(count_parameters(model._network)))
@@ -86,6 +88,10 @@ def _train(args):
         logging.info('CNN top1 curve: {}'.format(cnn_curve['top1']))
         logging.info('CNN top1 with task curve: {}'.format(cnn_curve_with_task['top1']))
         logging.info('CNN top1 task curve: {}'.format(cnn_curve_task['top1']))
+
+        cnn_keys = [key for key in cnn_accy["grouped"].keys() if '-' in key]
+        cnn_values = [cnn_accy["grouped"][key] for key in cnn_keys]
+        cnn_matrix.append(cnn_values)
 
 #         logging.info('CNN with task on key: {}'.format(cnn_accy_with_task_on_key['grouped']))
 #         cnn_curve_with_task_on_key['top1'].append(cnn_accy_with_task_on_key['top1'])
@@ -112,6 +118,17 @@ def _train(args):
 
     if args['use_wandb']:
         wandb.finish()
+
+    if len(cnn_matrix) > 0:
+        np_acctable = np.zeros([task + 1, task + 1])
+        for idxx, line in enumerate(cnn_matrix):
+            idxy = len(line)
+            np_acctable[idxx, :idxy] = np.array(line)
+        np_acctable = np_acctable.T
+        forgetting = np.mean((np.max(np_acctable, axis=1) - np_acctable[:, task])[:task])
+        print('Accuracy Matrix (CNN):')
+        print(np_acctable)
+        logging.info('Forgetting (CNN): {}'.format(forgetting))
 
 def _set_device(args):
     device_type = args['device']

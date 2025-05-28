@@ -57,7 +57,6 @@ class InfLoRA(BaseLearner):
         self.all_keys = []
         self.feature_list = []
         self.project_type = []
-        self._protos = []
 
     def after_task(self):
         # self._old_network = self._network.copy().freeze()
@@ -65,7 +64,7 @@ class InfLoRA(BaseLearner):
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
 
     def incremental_train(self, data_manager):
-        self.data_manager = data_manager
+
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self._network.update_fc(self._total_classes)
@@ -82,7 +81,6 @@ class InfLoRA(BaseLearner):
         # if len(self._multiple_gpus) > 1:
         #     self._network = nn.DataParallel(self._network, self._multiple_gpus)
         self._train(self.train_loader, self.test_loader)
-        self._build_protos()
         self.clustering(self.train_loader)
         # if len(self._multiple_gpus) > 1:
         #     self._network = self._network.module
@@ -101,29 +99,12 @@ class InfLoRA(BaseLearner):
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
-                # if "lora_B_trans_k" + "." + str(self._network.module.numtask - 1) in name:
-                #     param.requires_grad_(True)
-                # if "lora_B_trans_v" + "." + str(self._network.module.numtask - 1) in name:
-                #     param.requires_grad_(True)
-                if "lora_S_trans_k" + "." + str(self._network.module.numtask - 1) in name:
-                    param.requires_grad_(True)
-                if "lora_S_trans_v" + "." + str(self._network.module.numtask - 1) in name:
-                    param.requires_grad_(True)
-
             except:
                 if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
                 if "lora_B_k" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.numtask - 1) in name:
-                    param.requires_grad_(True)
-                # if "lora_B_trans_k" + "." + str(self._network.numtask - 1) in name:
-                #     param.requires_grad_(True)
-                # if "lora_B_trans_v" + "." + str(self._network.numtask - 1) in name:
-                #     param.requires_grad_(True)
-                if "lora_S_trans_k" + "." + str(self._network.numtask - 1) in name:
-                    param.requires_grad_(True)
-                if "lora_S_trans_v" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
 
         # Double check
@@ -145,10 +126,6 @@ class InfLoRA(BaseLearner):
                         U, S, V = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
-                        # module.lora_A_trans_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
-                        # module.lora_A_trans_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
-                        module.lora_A_trans_k[self._cur_task].weight.data.zero_()
-                        module.lora_A_trans_v[self._cur_task].weight.data.zero_()
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
             else:
@@ -167,78 +144,101 @@ class InfLoRA(BaseLearner):
                 kk = 0
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
+                        # cur_matrix = module.cur_matrix
+                        # if self.project_type[kk] == 'remove':
+                        #     cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                        # else:
+                        #     assert self.project_type[kk] == 'retain'
+                        #     cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                        # # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                        # cU, cS, cV = torch.svd(cur_matrix)
+                        # module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        # module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+
                         weight_k, weight_v = module.get_pre_matrix(self._cur_task)
+                        threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
+                        print ('Threshold: ', threshold) 
+                        weight_k, weight_v = weight_k.cpu(), weight_v.cpu()
                         cur_matrix = module.cur_matrix
-                        if self.project_type[kk] == 'remove':
-                            cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
-                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        else:
-                            assert self.project_type[kk] == 'retain'
-                            cur_matrix_new = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                        cU_k, cS_k, cV_k = torch.svd(weight_k)
+                        cU_v, cS_v, cV_v = torch.svd(weight_v)
+                        C, S, V = torch.svd(cur_matrix)
+                        sval_total = (S**2).sum()
+
+                        kval_ratio = (cS_k**2)/((cS_k**2).sum())
+                        # 投影能量计算
+                        projection_coeff = torch.mm(cU_k.T, cur_matrix) # [r, m] = [r, n] @ [n, m]
+                        fro_norm = torch.norm(projection_coeff, p='fro', dim=1)
+                        # 计算投影能量占比 
+                        projection_energy_ratio = (fro_norm**2)/sval_total # [r]
+                        score = (self._cur_task + 1) * kval_ratio - projection_energy_ratio  # shape=[k]
+                        sorted_scores, sorted_indices = torch.sort(score, descending=True)   # 降序排列
+
+                        cumulative_ratio = 0.0
+                        selected_indices = []
+
+                        for idx in sorted_indices:
+                            current_ratio = kval_ratio[idx]
+                            cumulative_ratio += current_ratio
+                            selected_indices.append(idx)
+                            if cumulative_ratio >= threshold:  # 严格满足条件时退出
+                                break
+                        
+                        base_k = torch.stack([cU_k[:, i] for i in selected_indices], dim=1)
+                        # base_k = torch.stack([cU_k[:, i] for i in torch.where((self._cur_task+1)*kval_ratio>projection_energy_ratio)[0]], dim=1)
+                        cur_matrix = cur_matrix - torch.mm(torch.mm(base_k,base_k.transpose(0, 1)),cur_matrix)
                         cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+
+                        vval_ratio = (cS_v**2)/((cS_v**2).sum())
+                        # 投影能量计算
+                        projection_coeff = torch.mm(cU_v.T, cur_matrix) # [r, m] = [r, n] @ [n, m]
+                        fro_norm = torch.norm(projection_coeff, p='fro', dim=1)
+                        # 计算投影能量占比 
+                        projection_energy_ratio = (fro_norm**2)/sval_total # [r]
+                        score = (self._cur_task + 1) * vval_ratio - projection_energy_ratio  # shape=[k]
+                        sorted_scores, sorted_indices = torch.sort(score, descending=True)   # 降序排列
+
+                        cumulative_ratio = 0.0
+                        selected_indices = []
+
+                        for idx in sorted_indices:
+                            current_ratio = vval_ratio[idx]
+                            cumulative_ratio += current_ratio
+                            selected_indices.append(idx)
+                            if cumulative_ratio >= threshold:  # 严格满足条件时退出
+                                break
+
+                        base_v = torch.stack([cU_v[:, i] for i in selected_indices], dim=1)
+                        # base_v = torch.stack([cU_v[:, i] for i in torch.where((self._cur_task+1)*vval_ratio>projection_energy_ratio)[0]], dim=1)
+                        cur_matrix = cur_matrix - torch.mm(torch.mm(base_v,base_v.transpose(0, 1)),cur_matrix)
+                        cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
-                        # A_trans_pinv = torch.linalg.pinv(cU_n[:,:module.rank].T/math.sqrt(3))  # 结果形状 (k, m) = (50, 100)
-                        A_trans_pinv = torch.pinverse(cU_n[:,:module.rank].T/math.sqrt(3)).to(self._device)  # 结果形状 (k, m) = (50, 100)
-                        module.lora_A_trans_k[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
-                        B_trans_k = weight_k @ A_trans_pinv
-                        module.lora_B_trans_k[self._cur_task].weight.data.copy_(B_trans_k)
-                        module.lora_A_trans_v[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
-                        B_trans_v = weight_v @ A_trans_pinv
-                        module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
                         module.cur_matrix.zero_()
+                        print ('Layer {} : k {}, v {}'.format(kk,base_k.shape[1], base_v.shape[1]))
                         module.n_cur_matrix = 0
                         kk += 1
         
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
-        
-        # 分离参数组
-        trans_params = []
-        other_params = []
-        
-        # 遍历所有可训练参数
-        for name, param in self._network.named_parameters():
-            if param.requires_grad:
-                if any(key in name for key in ['lora_S_trans_k', 'lora_S_trans_v']):
-                    trans_params.append(param)
-                else:
-                    other_params.append(param)
-
         if self._cur_task==0:
-            # 创建分层参数组
-            params = [
-                {'params': trans_params, 'lr': self.init_lr/10},  # 特殊学习率
-                {'params': other_params, 'lr': self.init_lr}
-            ]
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
-                # optimizer = optim.SGD(params, momentum=0.9, weight_decay=self.weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.init_epoch)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.init_lr,weight_decay=self.init_weight_decay, betas=(0.9,0.999))
-                # optimizer = optim.Adam(params, betas=(0.9,0.999), weight_decay=self.weight_decay)
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.init_epoch)
             else:
                 raise Exception
             self.run_epoch = self.init_epoch
             self.train_function(train_loader,test_loader,optimizer,scheduler)
         else:
-            # 创建分层参数组
-            params = [
-                {'params': trans_params, 'lr': self.lrate/10},  # 特殊学习率
-                {'params': other_params, 'lr': self.lrate}
-            ]
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.lrate,weight_decay=self.weight_decay)
-                # optimizer = optim.SGD(params, momentum=0.9, weight_decay=self.weight_decay)
                 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer,T_max=self.epochs)
             elif self.optim == 'adam':
                 optimizer = optim.Adam(self._network.parameters(),lr=self.lrate,weight_decay=self.weight_decay, betas=(0.9,0.999))
-                # optimizer = optim.Adam(params, betas=(0.9,0.999), weight_decay=self.weight_decay)
                 scheduler = CosineSchedule(optimizer=optimizer,K=self.epochs)
             else:
                 raise Exception
@@ -253,25 +253,20 @@ class InfLoRA(BaseLearner):
                 self._network(inputs, get_cur_feat=True)
 
             mat_list = []
-            layer = 0
             for module in self._network.modules():
                 if isinstance(module, Attention_LoRA):
-                    layer += 1
                     mat_list.append(deepcopy(module.cur_matrix))
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
-                    logging.info('Layer {} - lora_S_trans_k {}: {}, lora_S_trans_v {}: {}'
-                                 .format(layer, torch.sum(torch.abs(module.lora_S_trans_k[self._cur_task].weight)), module.lora_S_trans_k[self._cur_task].weight.cpu().numpy(),
-                                        torch.sum(torch.abs(module.lora_S_trans_v[self._cur_task].weight)), module.lora_S_trans_v[self._cur_task].weight.cpu().numpy()))
             # self.update_GPM(mat_list)
-            self.update_DualGPM(mat_list)
+            # self.update_DualGPM(mat_list)
 
-            # Projection Matrix Precomputation
-            self.feature_mat = []
-            for p in range(len(self.feature_list)):
-                Uf=torch.Tensor(np.dot(self.feature_list[p],self.feature_list[p].transpose()))
-                print('Layer {} - Projection Matrix shape: {}'.format(p+1,Uf.shape))
-                self.feature_mat.append(Uf)
+            # # Projection Matrix Precomputation
+            # self.feature_mat = []
+            # for p in range(len(self.feature_list)):
+            #     Uf=torch.Tensor(np.dot(self.feature_list[p],self.feature_list[p].transpose()))
+            #     print('Layer {} - Projection Matrix shape: {}'.format(p+1,Uf.shape))
+            #     self.feature_mat.append(Uf)
 
         return
 
@@ -288,26 +283,8 @@ class InfLoRA(BaseLearner):
                 inputs = torch.index_select(inputs, 0, mask)
                 targets = torch.index_select(targets, 0, mask)-self._known_classes
 
-                output = self._network(inputs)
-                logits = output['logits']
+                logits = self._network(inputs)['logits']
                 loss = F.cross_entropy(logits[:, self._known_classes:], targets)
-
-                # if self._cur_task > 0:
-                #     if isinstance(self._network, torch.nn.DataParallel):
-                #             loss_kd = _KD_loss(
-                #             logits[:, : self._known_classes],
-                #             self._network.module.interface_old(inputs),
-                #             2,
-                #         )
-                #     else:
-                #         loss_kd = _KD_loss(
-                #             logits[:, : self._known_classes],
-                #             self._network.interface_old(inputs),
-                #             2,
-                #         )
-                # else:
-                #     loss_kd = 0
-                # loss = loss + loss_kd * 10
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -326,6 +303,7 @@ class InfLoRA(BaseLearner):
             info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
                 self._cur_task, epoch + 1, self.run_epoch, losses / len(train_loader), train_acc)
             prog_bar.set_description(info)
+
         logging.info(info)
 
 
@@ -348,6 +326,7 @@ class InfLoRA(BaseLearner):
 
     def _evaluate(self, y_pred, y_true):
         ret = {}
+        print(len(y_pred), len(y_true))
         grouped = accuracy(y_pred, y_true, self._known_classes, self.class_num)
         ret['grouped'] = grouped
         ret['top1'] = grouped['total']
@@ -386,16 +365,6 @@ class InfLoRA(BaseLearner):
             y_true.append(targets.cpu().numpy())
 
         return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
-    
-    def test(self, num_task, data_manager):
-        test_dataset = data_manager.get_dataset(np.arange(0, 200), source='test', mode='test')
-        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
-        self._network.to(self._device)
-#         if len(self._multiple_gpus) > 1:
-#             self._network = nn.DataParallel(self._network, self._multiple_gpus)
-        for i in range(num_task):
-            self._network.update_fc(self._total_classes)
-        return self.eval_task()
 
     def _compute_accuracy_domain(self, model, loader):
         model.eval()
@@ -413,7 +382,7 @@ class InfLoRA(BaseLearner):
 
     def update_DualGPM (self, mat_list):
         threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
-        logging.info ('Threshold: {}'.format(threshold) )
+        print ('Threshold: ', threshold) 
         if len(self.feature_list) == 0:
             # After First Task 
             for i in range(len(mat_list)):
@@ -442,7 +411,6 @@ class InfLoRA(BaseLearner):
                     sval_hat = (S**2).sum()
                     sval_ratio = (S**2)/sval_total               
                     accumulated_sval = (sval_total-sval_hat)/sval_total
-                    logging.info("effective bases ratio: {}, frozen bases ratio: {}".format(sval_ratio[:10].sum(), accumulated_sval))
             
                     r = 0
                     for ii in range (sval_ratio.shape[0]):
@@ -452,7 +420,7 @@ class InfLoRA(BaseLearner):
                         else:
                             break
                     if r == 0:
-                        logging.info ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
+                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
                     # update GPM
                     Ui=np.hstack((self.feature_list[i],U[:,0:r]))  
@@ -472,7 +440,6 @@ class InfLoRA(BaseLearner):
                     sval_hat = (S**2).sum()
                     sval_ratio = (S**2)/sval_total               
                     accumulated_sval = sval_hat/sval_total
-                    logging.info("effective bases ratio: {}, frozen bases ratio: {}".format(sval_ratio[:10].sum(), 1 - accumulated_sval))
 
                     r = 0
                     for ii in range (sval_ratio.shape[0]):
@@ -482,7 +449,7 @@ class InfLoRA(BaseLearner):
                         else:
                             break
                     if r == 0:
-                        logging.info ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
+                        print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
 
                     # update GPM by Projected Representation (Eq-8)
@@ -490,9 +457,9 @@ class InfLoRA(BaseLearner):
                     Ui, Si, Vi = np.linalg.svd(act_feature)
                     self.feature_list[i]=Ui[:,:self.feature_list[i].shape[1]-r]
 
-        logging.info('-'*40)
-        logging.info('Gradient Constraints Summary')
-        logging.info('-'*40)
+        print('-'*40)
+        print('Gradient Constraints Summary')
+        print('-'*40)
         for i in range(len(self.feature_list)):
             if self.project_type[i]=='remove' and (self.feature_list[i].shape[1] > (self.feature_list[i].shape[0]/2)):
                 feature = self.feature_list[i]
@@ -503,8 +470,8 @@ class InfLoRA(BaseLearner):
                 self.project_type[i] = 'retain'
             elif self.project_type[i]=='retain':
                 assert self.feature_list[i].shape[1] <= (self.feature_list[i].shape[0]/2)
-            logging.info ('Layer {} : {}/{} type {}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0], self.project_type[i]))
-        logging.info('-'*40)
+            print ('Layer {} : {}/{} type {}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0], self.project_type[i]))
+        print('-'*40)
 
 
     def update_GPM (self, mat_list):
@@ -556,32 +523,3 @@ class InfLoRA(BaseLearner):
         for i in range(len(self.feature_list)):
             logging.info('Layer {} : {}/{}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0]))
         print('-'*40)  
-
-    def _build_protos(self):
-        for class_idx in range(self._known_classes, self._total_classes):
-            idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
-            idx_loader = DataLoader(idx_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
-            vectors, _ = self._extract_vectors(idx_loader)
-            class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
-            self._protos.append(torch.tensor(class_mean).to(self._device))
-
-def _KD_loss(pred, soft, T):
-    # print(pred.shape)
-    # print(soft.shape)
-    pred = torch.log_softmax(pred / T, dim=1)
-    soft = torch.softmax(soft / T, dim=1)
-    return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
-
-def weighted_KD_loss(pred, soft, T):
-
-    # 生成权重向量 (设备自动匹配)
-    weights = torch.cat([torch.full((10,), 1-0.01*w, device=pred.device) for w in range(pred.shape[1]//10)])
-    
-    # 温度缩放
-    pred_log_soft = torch.log_softmax(pred / T, dim=1)
-    soft_soft = torch.softmax(soft / T, dim=1)
-    
-    # 加权损失计算
-    weighted_loss = -(soft_soft * pred_log_soft * weights).sum(dim=1).mean()
-    
-    return weighted_loss

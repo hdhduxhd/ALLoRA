@@ -8,7 +8,7 @@
     "shuffle": true,
     "init_cls": 10,
     "increment": 10,
-    "model_name": "InfLoRA_CA",
+    "model_name": "InfLoRA_CA_SHIFT",
     "net_type": "sip",
     "embd_dim" : 768,
     "num_heads": 12,
@@ -28,5 +28,11 @@
     "rank": 10,
     "lamb": 0.95,
     "lame": 1.0,
-    "num_workers" : 16
+    "num_workers" : 16,
+    "ADC" : false,
+    "SDC" : true,
+    "sigma": 0.3,
+    "alpha": 25,
+    "adv_epoch": 10,
+    "sample_limit": 100
 }

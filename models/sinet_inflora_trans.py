@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import copy
 
-from models.vit_inflora import VisionTransformer, PatchEmbed, Block,resolve_pretrained_cfg, build_model_with_cfg, checkpoint_filter_fn
+from models.vit_inflora_trans import VisionTransformer, PatchEmbed, Block,resolve_pretrained_cfg, build_model_with_cfg, checkpoint_filter_fn
 from models.zoo import CodaPrompt
 
 class ViT_lora_co(VisionTransformer):
@@ -32,7 +32,7 @@ class ViT_lora_co(VisionTransformer):
         
         return x, prompt_loss
     
-    def interface_old(self, x, task_id, bases, types, register_blk=-1):
+    def interface_old(self, x, task_id, register_blk=-1):
         x = self.patch_embed(x)
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
@@ -40,10 +40,7 @@ class ViT_lora_co(VisionTransformer):
         x = self.pos_drop(x)
 
         for i, blk in enumerate(self.blocks):
-            if len(bases) > 0 and len(types) > 0:
-                x = blk.interface_old(x, task_id, bases[i], types[i], register_blk==i)
-            else:
-                x = blk(x, task_id, register_blk==i)
+            x = blk.interface_old(x, task_id, register_blk==i)
 
         x = self.norm(x)
         
@@ -117,16 +114,6 @@ class SiNet(nn.Module):
         image_features = image_features[:,0,:]
         # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
-    
-    def extract_vector_old(self, image, task=None, bases=None, types=None):
-        if task == None:
-            image_features = self.image_encoder.interface_old(image, self.numtask-1, bases, types)
-        else:
-            image_features = self.image_encoder.interface_old(image, task, bases, types)
-        image_features = image_features[:,0,:]
-        # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        return image_features
-    
 
     def forward(self, image, get_feat=False, get_cur_feat=False, fc_only=False):
         if fc_only:
