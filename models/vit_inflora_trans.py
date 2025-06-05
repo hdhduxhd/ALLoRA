@@ -304,39 +304,46 @@ class Attention_LoRA(nn.Module):
         
         return x
     
-    def interface_old(self, x, task, register_hook=False):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+    def interface_old(self, x, task, base, type, register_hook=False):
+        with torch.no_grad():
+            B, N, C = x.shape
+            if base is not None:
+                if type == 'remove':
+                    x = torch.mm(base, x.reshape(-1, C).t()).t().reshape(B, N, C)
+                else:
+                    assert type == 'retain'
+                    x = x - torch.mm(base, x.reshape(-1, C).t()).t().reshape(B, N, C)
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
-        # insert lora
-        if task > -0.5:
-            #learning discrepancy
-            weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
-            weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+            # insert lora
+            if task > -0.5:
+                #learning discrepancy
+                weight_k = torch.stack([torch.mm(self.lora_B_k[t].weight, self.lora_A_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
+                weight_v = torch.stack([torch.mm(self.lora_B_v[t].weight, self.lora_A_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
 
-            # weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
-            # weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
-            weight_trans_k = torch.stack([torch.mm(torch.mm(self.lora_B_trans_k[t].weight, torch.diag(self.lora_S_trans_k[t])), self.lora_A_trans_k[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
-            weight_trans_v = torch.stack([torch.mm(torch.mm(self.lora_B_trans_v[t].weight, torch.diag(self.lora_S_trans_v[t])), self.lora_A_trans_v[t].weight) for t in range(task+1)], dim=0).sum(dim=0)
+                # weight_trans_k = torch.stack([torch.mm(self.lora_B_trans_k[t].weight, self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
+                # weight_trans_v = torch.stack([torch.mm(self.lora_B_trans_v[t].weight, self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+                weight_trans_k = torch.stack([torch.mm(torch.mm(self.lora_B_trans_k[t].weight, torch.diag(self.lora_S_trans_k[t])), self.lora_A_trans_k[t].weight) for t in range(task)], dim=0).sum(dim=0)
+                weight_trans_v = torch.stack([torch.mm(torch.mm(self.lora_B_trans_v[t].weight, torch.diag(self.lora_S_trans_v[t])), self.lora_A_trans_v[t].weight) for t in range(task)], dim=0).sum(dim=0)
+                
+                k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+                v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
             
-            k = k + F.linear(x, weight_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_k).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-            v = v + F.linear(x, weight_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) + F.linear(x, weight_trans_v).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            if register_hook:
+                self.save_attention_map(attn)
+                attn.register_hook(self.save_attn_gradients)
 
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        
-        if register_hook:
-            self.save_attention_map(attn)
-            attn.register_hook(self.save_attn_gradients)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        
-        return x
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            x = self.proj(x)
+            x = self.proj_drop(x)
+            
+            return x
     
     def get_matrix(self, task):
         matrix_k = torch.mm(self.lora_B_k[task].weight, self.lora_A_k[task].weight)
@@ -386,8 +393,8 @@ class Block(nn.Module):
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
     
-    def interface_old(self, x, task, register_hook=False):
-        x = x + self.drop_path1(self.ls1(self.attn.interface_old(self.norm1(x), task, register_hook=register_hook)))
+    def interface_old(self, x, task, base=None, type=None, register_hook=False):
+        x = x + self.drop_path1(self.ls1(self.attn.interface_old(self.norm1(x), task, base, type, register_hook=register_hook)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
 

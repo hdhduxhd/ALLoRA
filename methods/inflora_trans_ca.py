@@ -11,8 +11,8 @@ from sklearn.cluster import KMeans
 
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy, accuracy
-from models.sinet_inflora import SiNet
-from models.vit_inflora import Attention_LoRA
+from models.sinet_inflora_trans import SiNet
+from models.vit_inflora_trans import Attention_LoRA
 from copy import deepcopy
 from utils.schedulers import CosineSchedule
 import ipdb
@@ -146,6 +146,15 @@ class InfLoRA_CA(BaseLearner):
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.module.numtask - 1) in name:
                     param.requires_grad_(True)
+                # if "lora_B_trans_k" + "." + str(self._network.module.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                # if "lora_B_trans_v" + "." + str(self._network.module.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                if "lora_S_trans_k" + "." + str(self._network.module.numtask - 1) in name:
+                    param.requires_grad_(True)
+                if "lora_S_trans_v" + "." + str(self._network.module.numtask - 1) in name:
+                    param.requires_grad_(True)
+
             except:
                 if "classifier_pool" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
@@ -153,9 +162,14 @@ class InfLoRA_CA(BaseLearner):
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
-
-        # if self._cur_task:
-        #     self._network.prompt_pool[self._cur_task].weight.data.copy_(self._network.prompt_pool[self._cur_task-1].weight.data)
+                # if "lora_B_trans_k" + "." + str(self._network.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                # if "lora_B_trans_v" + "." + str(self._network.numtask - 1) in name:
+                #     param.requires_grad_(True)
+                if "lora_S_trans_k" + "." + str(self._network.numtask - 1) in name:
+                    param.requires_grad_(True)
+                if "lora_S_trans_v" + "." + str(self._network.numtask - 1) in name:
+                    param.requires_grad_(True)
 
         # Double check
         enabled = set()
@@ -176,38 +190,61 @@ class InfLoRA_CA(BaseLearner):
                         U, S, V = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        # module.lora_A_trans_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        # module.lora_A_trans_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
+                        module.lora_A_trans_k[self._cur_task].weight.data.zero_()
+                        module.lora_A_trans_v[self._cur_task].weight.data.zero_()
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
             else:
-                # self.base_list = [torch.tensor(self.feature_mat[ii], device=self.__device) for ii in range(len(self.feature_mat))]
-                # self.base_type = deepcopy(self.project_type)
+                # kk = 0
+                # for module in self._network.modules():
+                #     if isinstance(module, Attention_LoRA):
+                #         cur_matrix = module.cur_matrix
+                #         cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                #         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                #         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         module.cur_matrix.zero_()
+                #         module.n_cur_matrix = 0
+                #         kk += 1
+
                 kk = 0
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
-                        cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                        cU_n, cS_n, cV_n = torch.svd(cur_matrix)
+                        if self.project_type[kk] == 'remove':
+                            cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
+                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                        else:
+                            assert self.project_type[kk] == 'retain'
+                            cur_matrix_new = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
                         cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                        cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
+                        # A_trans_pinv = torch.pinverse(cU_n[:,:module.rank].T/math.sqrt(3))  # 结果形状 (k, m) = (50, 100)
+                        module.lora_A_trans_k[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # B_trans_k = weight_k @ A_trans_pinv
+                        B_trans_k = torch.zeros_like(cU_n[:,:module.rank])
+                        B_trans_k[:module.rank, :module.rank] = torch.eye(module.rank)
+                        module.lora_B_trans_k[self._cur_task].weight.data.copy_(B_trans_k)
+                        module.lora_A_trans_v[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                        # B_trans_v = weight_v @ A_trans_pinv
+                        B_trans_v = torch.zeros_like(cU_n[:,:module.rank])
+                        B_trans_v[:module.rank, :module.rank] = torch.eye(module.rank)
+                        module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
 
-                        # cur_matrix = module.cur_matrix
-                        # if self.project_type[kk] == 'remove':
-                        #     cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        # else:
-                        #     assert self.project_type[kk] == 'retain'
-                        #     cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
-                        # # cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                        # cU, cS, cV = torch.svd(cur_matrix)
-                        # module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                        # module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
-
+        
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
+
         if self._cur_task==0:
             if self.optim == 'sgd':
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9,lr=self.init_lr,weight_decay=self.init_weight_decay)
@@ -237,16 +274,20 @@ class InfLoRA_CA(BaseLearner):
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 self._network(inputs, get_cur_feat=True)
-                # if i > 3: break
 
             mat_list = []
+            layer = 0
             for module in self._network.modules():
                 if isinstance(module, Attention_LoRA):
+                    layer += 1
                     mat_list.append(deepcopy(module.cur_matrix))
                     module.cur_matrix.zero_()
                     module.n_cur_matrix = 0
-            self.update_GPM(mat_list)
-            # self.update_DualGPM(mat_list)
+                    logging.info('Layer {} - lora_S_trans_k {}: {}, lora_S_trans_v {}: {}'
+                                 .format(layer, torch.sum(torch.abs(module.lora_S_trans_k[self._cur_task].weight)), module.lora_S_trans_k[self._cur_task].weight.cpu().numpy(),
+                                        torch.sum(torch.abs(module.lora_S_trans_v[self._cur_task].weight)), module.lora_S_trans_v[self._cur_task].weight.cpu().numpy()))
+            # self.update_GPM(mat_list)
+            self.update_DualGPM(mat_list)
 
             # Projection Matrix Precomputation
             self.feature_mat = []
@@ -593,82 +634,6 @@ class InfLoRA_CA(BaseLearner):
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=run_epochs)
         self._network.to(self._device)
 
-        # compensate the semantic drift in the prototypes with ADC
-        if self.args["ADC"]:
-            epoch = self.args["adv_epoch"]
-            print('alpha: ',self.args["alpha"])
-
-            for k, (_, data, label) in enumerate(self.train_loader):
-                if k == 0:
-                    x_min = data.min()
-                    x_max = data.max()
-                else:
-                    if data.min() < x_min:
-                        x_min = data.min()
-                    if data.max() > x_max:
-                        x_max = data.max()
-
-            xx, yy, feats = [], [], []
-            for _, data, label in self.train_loader:
-                xx.append(data)
-                yy.append(label)
-
-            xx = torch.cat(xx, dim=0)
-            yy = torch.cat(yy, dim=0)
-            feats = torch.tensor(self._extract_vectors(self.train_loader, old=True)[0]).to(self._device)
-
-            for class_idx in range(0, self._known_classes):
-                d = torch.cdist(feats, torch.tensor(self._class_means[class_idx], dtype=torch.float).unsqueeze(0).to(self._device)).squeeze()
-                closest = torch.argsort(d)[:self.args["sample_limit"]].cpu()
-                x_top = xx[[closest]]
-                y_top = yy[[closest]]
-                
-                idx_dataset = TensorDataset(x_top, y_top)
-                loader = DataLoader(idx_dataset, batch_size=int(self.args["sample_limit"]), shuffle=False)
-
-                attack = Attack(self._network, self.args["alpha"], loader, self._class_means[:self._known_classes], self._device, epoch, x_min, x_max, class_idx)
-                
-                x_, y_ = attack.run()
-                if len(x_) > 0:
-                    idx_dataset = TensorDataset(x_, y_)
-                idx_loader = DataLoader(idx_dataset, batch_size=self.batch_size, shuffle=False)
-
-                if idx_loader is not None:
-                    vectors_old = self._extract_vectors_adv(idx_loader, old=True)[0]
-                    vectors = self._extract_vectors_adv(idx_loader)[0]
-
-                MU = np.asarray(torch.tensor(self._class_means[class_idx], dtype=torch.float).unsqueeze(0).cpu())
-                gap = np.mean(vectors - vectors_old, axis=0)
-                MU += gap
-                self._class_means[class_idx] = MU[0]
-
-                # self._class_covs[class_idx] = (torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(MU.shape[-1])*1e-5)
-                    
-        # compensate the semantic drift in the prototypes with SDC
-        if self.args["SDC"]:
-            emb_old = self._extract_vectors(self.train_loader, old=True, bases=self.base_list, types=self.base_type)[0]
-            emb = self._extract_vectors(self.train_loader, bases=self.base_list, types=self.base_type)[0]
-            MU = np.stack(self._class_means[:self._known_classes])
-            gap = self.displacement(emb_old, emb, MU, self.args["sigma"])
-
-            MU += gap
-            self._class_means[:self._known_classes] = MU
-
-        if self.args["BDC"]:
-            for task_id in range(self._cur_task):
-                base_list = []
-                for p in range(len(self.feature_list)):
-                    Uf=torch.Tensor(np.dot(self.feature_list[p][:,:self.task_r[task_id]],self.feature_list[p][:,:self.task_r[task_id]].transpose()))
-                    base_list.append(Uf.to(self.__device))
-
-                emb_old = self._extract_vectors(self.train_loader, old=True, bases=base_list, types=self.base_type)[0]
-                emb = self._extract_vectors(self.train_loader, bases=base_list, types=self.base_type)[0]
-                MU = np.stack(self._class_means[task_id*self.task_sizes[task_id]:(task_id+1)*self.task_sizes[task_id]])
-                gap = self.displacement(emb_old, emb, MU, self.args["sigma"])
-
-                MU += gap
-                self._class_means[task_id*self.task_sizes[task_id]:(task_id+1)*self.task_sizes[task_id]] = MU
-
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
 
@@ -849,14 +814,14 @@ class InfLoRA_CA(BaseLearner):
             _targets = _targets.numpy()
             if isinstance(self._network, nn.DataParallel):
                 if old:
-                    _vectors = tensor2numpy(self._network.module.extract_vector_old(_inputs.to(self.__device), bases=bases, types=types))
+                    _vectors = tensor2numpy(self._network.module.extract_vector_old(_inputs.to(self.__device)))
                 else:
-                    _vectors = tensor2numpy(self._network.module.extract_vector(_inputs.to(self.__device), bases=bases, types=types))
+                    _vectors = tensor2numpy(self._network.module.extract_vector(_inputs.to(self.__device)))
             else:
                 if old:
-                    _vectors = tensor2numpy(self._network.extract_vector_old(_inputs.to(self.__device), bases=bases, types=types))
+                    _vectors = tensor2numpy(self._network.extract_vector_old(_inputs.to(self.__device)))
                 else:
-                    _vectors = tensor2numpy(self._network.extract_vector(_inputs.to(self.__device), bases=bases, types=types))
+                    _vectors = tensor2numpy(self._network.extract_vector(_inputs.to(self.__device)))
 
             vectors.append(_vectors)
             targets.append(_targets)

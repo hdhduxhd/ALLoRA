@@ -1,6 +1,8 @@
 from methods.inflorab5 import InfLoRAb5
 from methods.inflora_ca import InfLoRA_CA
+from methods.inflora_trans_ca import InfLoRA_CA as InfLoRA_TRANS_CA
 from methods.inflora_ca_shift import InfLoRA_CA as InfLoRA_CA_SHIFT
+from methods.inflora_trans_ca_shift import InfLoRA_CA as InfLoRA_TRANS_CA_SHIFT
 from methods.inflora_ca1 import InfLoRA_CA1
 from methods.inflora import InfLoRA
 from methods.inflora_trans import InfLoRA as InfLoRA_TRANS
@@ -21,7 +23,9 @@ def get_model(model_name, args):
                'inflora_domain': InfLoRA_domain,
                'inflorab5_domain': InfLoRAb5_domain,
                'inflora_ca': InfLoRA_CA,
+               'inflora_trans_ca': InfLoRA_TRANS_CA,
                'inflora_ca_shift': InfLoRA_CA_SHIFT,
+               'inflora_trans_ca_shift': InfLoRA_TRANS_CA_SHIFT,
                'inflora_ca1': InfLoRA_CA1,
                }
     return options[name](args)

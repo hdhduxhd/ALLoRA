@@ -32,7 +32,7 @@ class ViT_lora_co(VisionTransformer):
         
         return x, prompt_loss
     
-    def interface_old(self, x, task_id, register_blk=-1):
+    def interface_old(self, x, task_id, bases, types, register_blk=-1):
         x = self.patch_embed(x)
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
@@ -40,7 +40,10 @@ class ViT_lora_co(VisionTransformer):
         x = self.pos_drop(x)
 
         for i, blk in enumerate(self.blocks):
-            x = blk.interface_old(x, task_id, register_blk==i)
+            if len(bases) > 0 and len(types) > 0:
+                x = blk.interface_old(x, task_id, bases[i], types[i], register_blk==i)
+            else:
+                x = blk(x, task_id, register_blk==i)
 
         x = self.norm(x)
         
@@ -106,11 +109,26 @@ class SiNet(nn.Module):
     def feature_dim(self):
         return self.image_encoder.out_dim
 
-    def extract_vector(self, image, task=None):
+    def extract_vector(self, image, task=None, bases=None, types=None):
         if task == None:
-            image_features, _ = self.image_encoder(image, self.numtask-1)
+            if bases == None:
+                image_features, _ = self.image_encoder(image, self.numtask-1)
+            else:
+                image_features = self.image_encoder.interface_old(image, self.numtask, bases, types)
         else:
-            image_features, _ = self.image_encoder(image, task)
+            if bases == None:
+                image_features, _ = self.image_encoder(image, task)
+            else:
+                image_features = self.image_encoder.interface_old(image, task+1, bases, types)
+        image_features = image_features[:,0,:]
+        # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        return image_features
+    
+    def extract_vector_old(self, image, task=None, bases=None, types=None):
+        if task == None:
+            image_features = self.image_encoder.interface_old(image, self.numtask-1, bases, types)
+        else:
+            image_features = self.image_encoder.interface_old(image, task, bases, types)
         image_features = image_features[:,0,:]
         # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features

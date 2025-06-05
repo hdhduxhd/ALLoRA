@@ -109,11 +109,17 @@ class SiNet(nn.Module):
     def feature_dim(self):
         return self.image_encoder.out_dim
 
-    def extract_vector(self, image, task=None):
+    def extract_vector(self, image, task=None, bases=None, types=None):
         if task == None:
-            image_features, _ = self.image_encoder(image, self.numtask-1)
+            if bases == None:
+                image_features, _ = self.image_encoder(image, self.numtask-1)
+            else:
+                image_features = self.image_encoder.interface_old(image, self.numtask, bases, types)
         else:
-            image_features, _ = self.image_encoder(image, task)
+            if bases == None:
+                image_features, _ = self.image_encoder(image, task)
+            else:
+                image_features = self.image_encoder.interface_old(image, task+1, bases, types)
         image_features = image_features[:,0,:]
         # image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         return image_features
