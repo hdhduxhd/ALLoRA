@@ -197,30 +197,12 @@ class InfLoRA_CA(BaseLearner):
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
             else:
-                # kk = 0
-                # for module in self._network.modules():
-                #     if isinstance(module, Attention_LoRA):
-                #         cur_matrix = module.cur_matrix
-                #         cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                #         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
-                #         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                #         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
-                #         module.cur_matrix.zero_()
-                #         module.n_cur_matrix = 0
-                #         kk += 1
-
                 kk = 0
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
-                        cU_n, cS_n, cV_n = torch.svd(cur_matrix)
-                        if self.project_type[kk] == 'remove':
-                            cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
-                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        else:
-                            assert self.project_type[kk] == 'retain'
-                            cur_matrix_new = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                        cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
+                        cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
                         cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
@@ -236,10 +218,41 @@ class InfLoRA_CA(BaseLearner):
                         B_trans_v = torch.zeros_like(cU_n[:,:module.rank])
                         B_trans_v[:module.rank, :module.rank] = torch.eye(module.rank)
                         module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
-
                         module.cur_matrix.zero_()
                         module.n_cur_matrix = 0
                         kk += 1
+
+                # kk = 0
+                # for module in self._network.modules():
+                #     if isinstance(module, Attention_LoRA):
+                #         cur_matrix = module.cur_matrix
+                #         cU_n, cS_n, cV_n = torch.svd(cur_matrix)
+                #         if self.project_type[kk] == 'remove':
+                #             cur_matrix_new = torch.mm(self.feature_mat[kk],cur_matrix)
+                #             cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                #         else:
+                #             assert self.project_type[kk] == 'retain'
+                #             cur_matrix_new = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                #             cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                #         cU, cS, cV = torch.svd(cur_matrix)
+                #         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
+                #         cU_n, cS_n, cV_n = torch.svd(cur_matrix_new)
+                #         # A_trans_pinv = torch.pinverse(cU_n[:,:module.rank].T/math.sqrt(3))  # 结果形状 (k, m) = (50, 100)
+                #         module.lora_A_trans_k[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                #         # B_trans_k = weight_k @ A_trans_pinv
+                #         B_trans_k = torch.zeros_like(cU_n[:,:module.rank])
+                #         B_trans_k[:module.rank, :module.rank] = torch.eye(module.rank)
+                #         module.lora_B_trans_k[self._cur_task].weight.data.copy_(B_trans_k)
+                #         module.lora_A_trans_v[self._cur_task].weight.data.copy_(cU_n[:,:module.rank].T/math.sqrt(3))
+                #         # B_trans_v = weight_v @ A_trans_pinv
+                #         B_trans_v = torch.zeros_like(cU_n[:,:module.rank])
+                #         B_trans_v[:module.rank, :module.rank] = torch.eye(module.rank)
+                #         module.lora_B_trans_v[self._cur_task].weight.data.copy_(B_trans_v)
+
+                #         module.cur_matrix.zero_()
+                #         module.n_cur_matrix = 0
+                #         kk += 1
         
         print(f"Parameters to be updated: {enabled}")
         if len(self._multiple_gpus) > 1:
@@ -286,8 +299,8 @@ class InfLoRA_CA(BaseLearner):
                     logging.info('Layer {} - lora_S_trans_k {}: {}, lora_S_trans_v {}: {}'
                                  .format(layer, torch.sum(torch.abs(module.lora_S_trans_k[self._cur_task].weight)), module.lora_S_trans_k[self._cur_task].weight.cpu().numpy(),
                                         torch.sum(torch.abs(module.lora_S_trans_v[self._cur_task].weight)), module.lora_S_trans_v[self._cur_task].weight.cpu().numpy()))
-            # self.update_GPM(mat_list)
-            self.update_DualGPM(mat_list)
+            self.update_GPM(mat_list)
+            # self.update_DualGPM(mat_list)
 
             # Projection Matrix Precomputation
             self.feature_mat = []

@@ -39,7 +39,7 @@ def train(args):
 
 def _train(args):
     if args['model_name'] in ['InfLoRA', 'InfLoRA_TRANS', 'InfLoRA_domain', 'InfLoRAb5_domain', 'InfLoRAb5', 'InfLoRA_CA', 'InfLoRA_CA_SHIFT', 'InfLoRA_TRANS_CA_SHIFT', 'InfLoRA_CA1']:
-        logdir = 'logs/{}/{}_{}_{}/{}/{}/{}/{}_{}-{}_{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'], args['rank'], args['lamb'], args['lame'], args['lrate'], args['epochs'])
+        logdir = 'log/{}/{}_{}_{}/{}/{}/{}/{}_{}-{}_{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'], args['rank'], args['lamb'], args['lame'], args['lrate'], args['epochs'])
     else:
         logdir = 'logs/{}/{}_{}_{}/{}/{}'.format(args['dataset'], args['init_cls'], args['increment'], args['net_type'], args['model_name'], args['optim'])
 
