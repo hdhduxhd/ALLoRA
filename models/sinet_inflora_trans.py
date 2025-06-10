@@ -32,7 +32,7 @@ class ViT_lora_co(VisionTransformer):
         
         return x, prompt_loss
     
-    def interface_old(self, x, task_id, bases, types, register_blk=-1):
+    def interface_old(self, x, task_id, bases=None, types=None, register_blk=-1):
         x = self.patch_embed(x)
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
 
@@ -40,7 +40,7 @@ class ViT_lora_co(VisionTransformer):
         x = self.pos_drop(x)
 
         for i, blk in enumerate(self.blocks):
-            if len(bases) > 0 and len(types) > 0:
+            if bases is not None and len(bases) > 0 and len(types) > 0:
                 x = blk.interface_old(x, task_id, bases[i], types[i], register_blk==i)
             else:
                 x = blk(x, task_id, register_blk==i)
