@@ -106,15 +106,15 @@ class InfLoRA_CA(BaseLearner):
         # if self.save_before_ca:
         #     self.save_checkpoint(self.log_path+'/'+self.model_prefix+'_seed{}_before_ca'.format(self.seed), head_only=self.fix_bcb)
         
-        # self._compute_class_mean(data_manager, check_diff=False, oracle=False)
+        self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task>0:
             self._stage2_compact_classifier(self.task_sizes[-1])
             if len(self._multiple_gpus) > 1:
                 self._network = self._network.module
 
-        # mean_errors, cov_errors = self._get_real_mean_cov()
-        # logging.info("Mean errors: {}".format(mean_errors))
-        # logging.info("Cov errors: {}".format(cov_errors))
+        mean_errors, cov_errors = self._get_real_mean_cov()
+        logging.info("Mean errors: {}".format(mean_errors))
+        logging.info("Cov errors: {}".format(cov_errors))
 
     def _compute_accuracy(self, model, loader):
         model.eval()
@@ -604,18 +604,18 @@ class InfLoRA_CA(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
 
-        self._class_means = np.zeros((self._total_classes, self.feature_dim))
-        self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+        # self._class_means = np.zeros((self._total_classes, self.feature_dim))
+        # self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
 
-        for class_idx in range(0, self._total_classes):
-            idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
-            idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
-            vectors, _ = self._extract_vectors(idx_loader)
-            class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
-            class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-5
+        # for class_idx in range(0, self._total_classes):
+        #     idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
+        #     idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
+        #     vectors, _ = self._extract_vectors(idx_loader)
+        #     class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
+        #     class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-5
             
-            self._class_means[class_idx, :] = class_mean
-            self._class_covs[class_idx, ...] = class_cov
+        #     self._class_means[class_idx, :] = class_mean
+        #     self._class_covs[class_idx, ...] = class_cov
 
         self._network.eval()
         for epoch in range(run_epochs):

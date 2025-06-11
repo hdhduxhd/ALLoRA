@@ -71,7 +71,7 @@ class InfLoRA_CA(BaseLearner):
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
 
     def incremental_train(self, data_manager):
-
+        self.data_manager = data_manager
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
         self.task_sizes.append(data_manager.get_task_size(self._cur_task))
@@ -98,7 +98,7 @@ class InfLoRA_CA(BaseLearner):
         # if self.save_before_ca:
         #     self.save_checkpoint(self.log_path+'/'+self.model_prefix+'_seed{}_before_ca'.format(self.seed), head_only=self.fix_bcb)
         
-        self._compute_class_mean(data_manager, check_diff=False, oracle=False)
+        # self._compute_class_mean(data_manager, check_diff=False, oracle=False)
         if self._cur_task>0:
             self._stage2_compact_classifier(self.task_sizes[-1])
             if len(self._multiple_gpus) > 1:
@@ -161,7 +161,7 @@ class InfLoRA_CA(BaseLearner):
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
-                        U, S, V = torch.linalg.svd(cur_matrix)
+                        U, S, V = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(U[:,:module.rank].T/math.sqrt(3))
                         module.cur_matrix.zero_()
@@ -172,7 +172,7 @@ class InfLoRA_CA(BaseLearner):
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
                         cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
-                        cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
+                        cU, cS, cV = torch.svd(cur_matrix)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
 
@@ -579,6 +579,19 @@ class InfLoRA_CA(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
 
+        self._class_means = np.zeros((self._total_classes, self.feature_dim))
+        self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+
+        for class_idx in range(0, self._total_classes):
+            idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train', mode='test')
+            idx_loader = DataLoader(idx_dataset, batch_size=64, shuffle=False, num_workers=4)
+            vectors, _ = self._extract_vectors(idx_loader)
+            class_mean = np.mean(vectors, axis=0) # vectors.mean(0)
+            class_cov = torch.tensor(np.cov(vectors.T), dtype=torch.float64)+torch.eye(class_mean.shape[-1])*1e-5
+            
+            self._class_means[class_idx, :] = class_mean
+            self._class_covs[class_idx, ...] = class_cov
+
         self._network.eval()
         for epoch in range(run_epochs):
             losses = 0.
@@ -596,7 +609,7 @@ class InfLoRA_CA(BaseLearner):
                 try:
                     m = MultivariateNormal(cls_mean.float(), cls_cov.float())
                 except:
-
+                    cls_cov = cls_cov+torch.eye(cls_mean.shape[-1]).to(cls_cov.device)*1e-3
                     if self.dataset == 'ImageNet_A':
                         while True:
                             try:
